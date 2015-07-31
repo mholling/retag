@@ -46,14 +46,20 @@ ALL_KEYS = Curses::Key.constants.map { |symbol| Curses::Key.const_get symbol }
 class String
   ARTICLES     = %w[a and the]
   CONJUNCTIONS = %w[and as but for nor or so yet]
-  PREPOSITIONS = %w[amid at but by down for from in into like near of off on onto out over past with till to unto up upon with]
+  PREPOSITIONS = %w[amid at but by down for from in into near of off on onto out over past with till to unto up upon with]
   TITLECASE_EXCEPTIONS = ARTICLES | CONJUNCTIONS | PREPOSITIONS
   PHRASAL_VERBS = %w[Beat Up Blow Out Blow Up Break Down Break Into Break Up Bring Up Call Off Call On Call Up Carry On Come Back Come Down Come On Come Out Come Over Do Over Fill In Fill Out Find Out Get Along Get Around Get By Get Over Get Through Get Up Give Back Give Up Go Along Go Away Go On Go Over Hand In Hang Up Hold On Keep On Keep Up Leave Out Let Down Look For Look Into Look Like Look Out Look Over Look Up Make Out Make Up Pack Up Pass Out Pick Out Pick Up Put Away Put Off Put On Put Out Put Up Roll Over Run Into Run Out Run Over Show Up Take After Take Back Take Off Take On Take Up Talk Back Talk Over Throw Away Try On Turn Down Turn In Turn Off Turn On Use Up Wait On].map(&:downcase).each_slice(2)
   
   PROPER_NOUN_EXCEPTIONS = %w[and the of]
   
-  def capitalise_word!
-    replace split(/(^'|^"|^\(|^\[|\/|-)/).map(&:capitalize).join
+  def capitalise
+    split(/(^'|^"|^\(|^\[|\/|-)/).reject(&:empty?).map do |part|
+      part[0].capitalize + part[1..-1]
+    end.join
+  end
+  
+  def capitalise!
+    replace capitalise
   end
   
   [ [ :proper_noun, PROPER_NOUN_EXCEPTIONS, [] ], [ :titlecase, TITLECASE_EXCEPTIONS, PHRASAL_VERBS ] ].each do |method, exceptions, pairs|
@@ -63,15 +69,15 @@ class String
       end.tap do |words|
         words.zip(words.rotate).each.with_index do |pair, index|
           case pair
-          when *pairs then words[index,2].each &:capitalize! unless index == words.length - 1
+          when *pairs then words[index,2].each &:capitalise! unless index == words.length - 1
           end
           case pair.first
           when *exceptions
-          else words[index].capitalise_word!
+          else words[index].capitalise!
           end
         end
-        words[0].capitalise_word!
-        words[-1].capitalise_word!
+        words[0].capitalise!
+        words[-1].capitalise!
       end.join ?\s
     end
   end
