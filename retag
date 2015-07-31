@@ -965,7 +965,7 @@ ensure
   when TTY
     paths, tags = tracks.transpose
     yaml = Hash[paths.map(&:to_s).zip tags].to_yaml
-    TTY.puts yaml
+    TTY.puts yaml unless options[:to]
   else
     $stdout << "saving tags to '#{ARGF.filename}' ... "
     paths, tags = tracks.transpose
