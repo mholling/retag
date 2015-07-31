@@ -1,0 +1,970 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'pathname'
+require 'fileutils'
+require 'optparse'
+require 'csv'
+require 'curses'
+require 'diff-lcs'
+require 'tmpdir'
+require 'taglib'
+require 'webrick'
+require 'socket'
+require 'base64'
+require 'erb'
+require 'net/http'
+require 'json'
+
+# gems required: curses, taglib, diff-lcs
+
+ACTIONS, FRAME_IDS, HEADINGS = [
+  [ :read_tags   , nil   , "Read Tags"    ],
+  [ :album_artist, "TPE2", "Album Artist" ],
+  [ :album_title , "TALB", "Album Title"  ],
+  [ :album_year  , "TDOR", "Album Year"   ],
+  [ :disc_number , "TPOS", "Disc Number"  ],
+  [ :track_artist, "TPE1", "Track Artist" ],
+  [ :track_number, "TRCK", "Track Number" ],
+  [ :track_title , "TIT2", "Track Title"  ],
+  [ :compilation , "TXXX", "Compilation"  ],
+  [ :cover_art   , "APIC", "Cover Art"    ],
+  [ :replay_gain , "TXXX", "Replay Gain"  ],
+  [ :rename      , nil   , "Tag & Rename" ],
+].transpose
+ READ_IDS = %w[TPE2 TALB TDOR TORY TDRC TYER TPOS TPE1 TRCK TIT2          ]
+WRITE_IDS = %w[TPE2 TALB TDOR                TPOS TPE1 TRCK TIT2 TXXX APIC]
+
+PREV_EDIT = [ Curses::KEY_UP, Curses::KEY_BTAB ]
+NEXT_EDIT = [ Curses::KEY_DOWN, ?\t.ord ]
+PREV_PANE = Curses::KEY_PPAGE
+NEXT_PANE = Curses::KEY_NPAGE
+QUIT      = ?\e.ord
+
+ALL_KEYS = Curses::Key.constants.map { |symbol| Curses::Key.const_get symbol }
+
+class String
+  ARTICLES     = %w[a and the]
+  CONJUNCTIONS = %w[and as but for nor or so yet]
+  PREPOSITIONS = %w[amid at but by down for from in into like near of off on onto out over past with till to unto up upon with]
+  TITLECASE_EXCEPTIONS = ARTICLES | CONJUNCTIONS | PREPOSITIONS
+  PHRASAL_VERBS = %w[Beat Up Blow Out Blow Up Break Down Break Into Break Up Bring Up Call Off Call On Call Up Carry On Come Back Come Down Come On Come Out Come Over Do Over Fill In Fill Out Find Out Get Along Get Around Get By Get Over Get Through Get Up Give Back Give Up Go Along Go Away Go On Go Over Hand In Hang Up Hold On Keep On Keep Up Leave Out Let Down Look For Look Into Look Like Look Out Look Over Look Up Make Out Make Up Pack Up Pass Out Pick Out Pick Up Put Away Put Off Put On Put Out Put Up Roll Over Run Into Run Out Run Over Show Up Take After Take Back Take Off Take On Take Up Talk Back Talk Over Throw Away Try On Turn Down Turn In Turn Off Turn On Use Up Wait On].map(&:downcase).each_slice(2)
+  
+  PROPER_NOUN_EXCEPTIONS = %w[and the of]
+  
+  def capitalise_word!
+    replace split(/(^'|^"|^\(|^\[|\/|-)/).map(&:capitalize).join
+  end
+  
+  [ [ :proper_noun, PROPER_NOUN_EXCEPTIONS, [] ], [ :titlecase, TITLECASE_EXCEPTIONS, PHRASAL_VERBS ] ].each do |method, exceptions, pairs|
+    define_method(method) do
+      split(?\s).map do |word|
+        word =~ /[a-z]/ ? word.downcase : word
+      end.tap do |words|
+        words.zip(words.rotate).each.with_index do |pair, index|
+          case pair
+          when *pairs then words[index,2].each &:capitalize! unless index == words.length - 1
+          end
+          case pair.first
+          when *exceptions
+          else words[index].capitalise_word!
+          end
+        end
+        words[0].capitalise_word!
+        words[-1].capitalise_word!
+      end.join ?\s
+    end
+  end
+  
+  def to_safe_filename
+    gsub(/[<>:"\?\*\|\/]|^\.|[\x00-\x1f]/, ?-).gsub(/\s+$|^\s+/, '')
+  end
+end
+
+def get_string(window, *special_keys)
+  Curses.curs_set 1
+  window.keypad = true
+  characters, index, byte = [], 0, nil
+  while true
+    window.clear
+    index = [ index, window.maxx ].min
+    window.addstr characters[0...window.maxx].join
+    window.setpos 0, index
+    window.refresh
+    case character = Curses.getch
+    when *special_keys
+      return character
+    when Curses::KEY_ENTER, ?\n.ord, ?\f.ord
+      break
+    when Curses::KEY_LEFT
+      index -= 1 if index > 0
+    when Curses::KEY_RIGHT
+      index += 1 if index < [ characters.length, window.maxx - 1 ].min
+    when Curses::KEY_END
+      index = [ characters.length, window.maxx - 1 ].min
+    when Curses::KEY_HOME
+      index = 0
+    when Curses::KEY_BACKSPACE, ?\b.ord, 0x7f
+      if index > 0
+        index -= 1
+        characters.delete_at index
+      end
+    when Curses::KEY_DC
+      characters.delete_at index
+    when *ALL_KEYS
+    when String, Fixnum
+      if Fixnum === character && character > 31
+        if byte then character, byte = [ byte, character ].pack('CC').force_encoding('utf-8'), nil
+        else byte = character
+        end
+      end
+      if String === character && index < window.maxx - 1
+        characters.insert index, character
+        index += 1
+      end
+    end
+  end
+  characters.join
+ensure
+  Curses.curs_set 0
+end
+
+def left_text(window, message)
+  window.clear
+  [ *message ].each.with_index do |line, index|
+    window.setpos index, 0
+    window.addstr line
+  end
+  window.refresh
+end
+
+def centre_text(window, message)
+  window.clear
+  [ *message ].each.with_index do |line, index|
+    window.setpos index, 0
+    window.addstr line.center(window.maxx)
+  end
+  window.refresh
+end
+
+def show_page(window, page, total)
+  template = "%s%s"
+  spaces = window.maxx - (template % [ nil, nil ]).length
+  left = (page + 1) * spaces / total
+  right = spaces - left
+  window.clear
+  window.setpos 0, 0
+  window.addstr template % [ '.' * left, ' ' * right ]
+  window.refresh
+end
+
+def wait_key(window, message, key, *special_keys)
+  centre_text window, message
+  while true
+    case character = Curses.getch
+    when key
+      break character
+    when *special_keys
+      Curses.ungetch character
+      break false
+    end
+  end
+ensure
+  window.clear
+  window.refresh
+end
+
+module Enumerable
+  def many?
+    inject(0) do |count, element|
+      count += 1 if block_given? ? yield(element) : element
+      break count if count > 1
+      count
+    end > 1
+  end
+end
+
+module Progress
+  def progress(window, message)
+    template = "%s: [%s%s]"
+    nn = window.maxx - (template % [ message, nil, nil ]).length - 1
+    Enumerator.new do |yielder|
+      each.with_index.inject(nil) do |m, (element, index)|
+        (length > 1 ? nn * index/(length - 1) : 0).tap do |n|
+          if m != n
+            window.clear
+            centre_text window, template % [ message, ?- * n, ?\s * (nn - n) ] if m != n
+            window.refresh
+          end
+          yielder << element
+        end
+      end
+      self
+    end
+  end
+end
+
+module Skipping
+  def skipping_each
+    index = 0
+    begin
+      break unless count > 0
+      case yield to_a[index]
+      when -1 then index = [ index - 1, 0 ].max
+      when  0
+      when +1 then index = [ index + 1, count - 1 ].min
+      end
+    rescue StopIteration
+      break
+    end while true
+    self
+  end
+  
+  def skipping_each_with_page
+    each.with_index.skipping_each do |element, index|
+      yield [ element, index, count ]
+    end
+    self
+  end
+end
+
+class Array
+  include Progress
+  include Skipping
+  
+  def key_to_s
+    [ *first ].map &:to_s
+  end
+end
+
+class Enumerator
+  include Skipping
+end
+
+class Hash
+  include Progress
+end
+
+class Preview
+  HTML = <<-EOF
+  <!DOCTYPE html>
+  <html>
+    <head>
+      <script>
+        var source = new EventSource('/events');
+        source.onmessage = function(event) {
+          document.body.style.backgroundImage = event.data ? 'url(data:image/jpeg;base64,' + event.data.replace(/\\s|\\n/gm, '') + ')' : 'none';
+        }
+        source.onerror = function(error) {
+          document.body.style.backgroundImage = 'none';
+        };
+      </script>
+      <title></title>
+    </head>
+    <body style="background-repeat: no-repeat"></body>
+  </html>
+  EOF
+  
+  def initialize(port)
+    address = Socket.ip_address_list.find(&:ipv4_private?)
+    @url = address && "http://#{address.ip_address}:#{port}"
+    @lock, @updated, @stopping, @connections = Mutex.new, ConditionVariable.new, false, {}
+    @server = WEBrick::HTTPServer.new :Port => port, :Logger => WEBrick::Log.new(File::NULL), :AccessLog => []
+    @server.mount_proc("/") do |request, response|
+      response["content-type"] = "text/html"
+      response.body = HTML
+    end
+    @server.mount_proc("/events") do |request, response|
+      response["content-type"] = "text/event-stream"
+      response.body = self
+      response.chunked = true
+    end
+    @thread = Thread.new { @server.start }
+  end
+  
+  attr_reader :url
+  
+  def stop
+    @lock.synchronize do
+      @stopping = true
+      @updated.broadcast
+    end
+    @server.shutdown
+    @thread.join
+  end
+  
+  def set(image)
+    lines = image ? Base64.encode64(image).split(?\n) : [ '' ]
+    string = lines.map do |data|
+      "data:#{data}\n"
+    end.join << "\n"
+    @lock.synchronize do
+      @connections.each do |key, value|
+        value << string
+      end
+      @updated.broadcast
+    end
+  end
+  
+  def readpartial(maxlen, outbuf)
+    @lock.synchronize do
+      @connections[Thread.current.object_id] ||= ''
+      while @connections[Thread.current.object_id].empty?
+        @updated.wait @lock
+        raise EOFError if @stopping
+      end
+      outbuf.replace @connections[Thread.current.object_id].slice!(0, maxlen)
+    end
+  end
+  
+  def close
+    @lock.synchronize do
+      @connections.delete Thread.current.object_id
+    end
+  end
+end
+
+options = { :port => 8080, :art => [] }
+OptionParser.new("usage: retag [options] [file]") do |opts|
+  opts.on "--from DIRECTORY", "process MP3s from DIRECTORY (otherwise read tags as YAML from file or input)" do |value|
+    options[:from] = Pathname.new(value).expand_path
+  end
+  opts.on "--to DIRECTORY", "copy and retag MP3s to DIRECTORY (otherwise write tags as YAML to file or output)" do |value|
+    options[:to]   = Pathname.new(value).expand_path
+  end
+  opts.on "--port PORT", "use PORT as port number for HTTP cover art preview" do |value|
+    options[:port] = value.to_i
+  end
+  opts.on "--art", "force rescan of cover art from original files & folders" do |value|
+    options[:art] << :tags << :folders
+  end
+  opts.on "--itunes", "download cover art from iTunes" do |value|
+    options[:art] << :itunes
+  end
+  opts.on "--apic", "store cover art in APIC tags" do |value|
+    options[:apic] = true
+  end
+end.parse!
+
+TTY = begin
+  ARGF.file.tty? && $stdout.clone
+rescue Errno::ENOENT
+  false
+end
+
+tracks = begin
+  abort "error: file '#{ARGF.filename}' does not exist" unless ARGF.file
+  paths, tags = YAML.load(ARGF).to_a.transpose
+  paths.map do |path|
+    Pathname.new path
+  end.zip tags
+end unless options[:from]
+
+$stdout.reopen "/dev/tty"
+$stdin.reopen "/dev/tty"
+
+begin
+  preview = Preview.new options[:port]
+  
+  Curses.init_screen
+  Curses.start_color
+  Curses.clear
+  Curses.init_pair Curses::COLOR_GREEN, Curses::COLOR_GREEN, Curses::COLOR_BLACK
+  Curses.init_pair Curses::COLOR_RED,   Curses::COLOR_RED, Curses::COLOR_BLACK
+  Curses.stdscr.keypad = true
+  Curses.crmode
+  Curses.curs_set 0
+  Curses.noecho
+  
+  ACTIONS.zip(FRAME_IDS).skipping_each do |action, frame_id|
+    width = Curses.stdscr.maxx
+    Curses.clear
+    
+    pane = nil
+    ACTIONS.zip(HEADINGS).inject(0) do |row, (other, heading)|
+      case other
+      when action
+        Curses.setpos  row, (width - heading.length) / 2
+        Curses.attron  Curses::A_UNDERLINE
+        Curses.addstr  heading
+        Curses.setpos  row + 12, 0
+        Curses.addstr  ' ' * width
+        Curses.attroff Curses::A_UNDERLINE
+        pane = Curses::Window.new 10, 0, row + 2, 0
+        row + 13
+      else
+        Curses.setpos row, 0
+        Curses.attron  Curses::A_UNDERLINE
+        Curses.addstr  heading.center(width)
+        Curses.attroff Curses::A_UNDERLINE
+        row + 1
+      end
+    end.tap do |row|
+      Curses.setpos  row + 1, 0
+      Curses.addstr  "change pane: PgUp PgDn    change item: ↑ ↓   edit: ← →   accept: ↵   exit & save: ctrl-c".center(width)
+      Curses.setpos  row + 2, 0
+      Curses.attron  Curses::A_UNDERLINE
+      Curses.addstr  ' '.center(width)
+      Curses.attroff Curses::A_UNDERLINE
+    end
+    Curses.refresh
+    bar  = pane.subwin 1, pane.maxx - 4,     pane.cury + pane.begy, 2 + pane.begx
+    page = pane.subwin 1, pane.maxx - 4, 9 + pane.cury + pane.begy, 2 + pane.begx
+    
+    case action
+    when :read_tags
+      tracks ||= begin
+        Pathname.glob(options[:from] + '**/*.mp3').progress(bar, "reading MP3 tags").map do |path|
+          frames = TagLib::MPEG::File.open(path.to_s) do |mp3|
+            names = %w[album artist title track year ]
+            ids   = %w[TALB  TPE1   TIT2  TRCK  TDOR ]
+            nulls = %w[nil?  nil?   nil?  zero? zero?]
+            generic = names.map do |name|
+              mp3.tag.send(name)
+            end.zip(ids, nulls).map do |value, id, null|
+              [ id, value.send(null) ? nil : value.to_s ]
+            end.select(&:last)
+            id3v2 = mp3.id3v2_tag.frame_list.select do |frame|
+              READ_IDS.include? frame.frame_id
+            end.map do |frame|
+              [ frame.frame_id, frame.to_string ]
+            end
+            (generic + id3v2).reject do |id, value|
+              value.to_s.empty?
+            end
+          end
+          [ path, Hash[frames] ]
+        end
+      end
+    when :album_title
+      tracks.reject do |path, frames|
+        frames["TALB"]
+      end.each do |path, frames|
+        frames.delete "TDOR"
+        frames.delete "TPOS"
+        frames.delete "TRCK"
+        frames.delete "TPE2"
+      end
+    when :track_artist
+      tracks.select do |path, frames|
+        frames["TPE2"] && !frames["TPE1"]
+      end.each do |path, frames|
+        frames["TPE1"] = frames["TPE2"]
+      end
+    when :track_number
+      tracks.select do |path, frames|
+        frames["TRCK"]
+      end.each do |path, frames|
+        track = frames["TRCK"][/^\d+/]
+        track ? frames["TRCK"] = track.to_i.to_s : frames.delete("TRCK")
+      end
+    when :cover_art
+      tracks.reject do |path, frames|
+        frames["TALB"]
+      end.each do |path, frames|
+        frames["APIC"] = []
+      end
+      sources = options.delete(:art) || []
+      sources |= [ :tags, :folders ] if tracks.any? do |path, frames|
+        frames["TALB"] && !frames["APIC"]
+      end
+      tracks.group_by do |path, frames|
+        frames.values_at *%w[TPE2 TALB TPOS APIC]
+      end.progress(bar, "reading cover art").map do |(tpe2, talb, tpos, apic), group|
+        paths, tags = group.transpose
+        images = apic || []
+        sources.each do |source|
+          case source
+          when :tags
+            images += paths.map do |path|
+              TagLib::MPEG::File.open(path.to_s) do |mp3|
+                mp3.id3v2_tag.frame_list("APIC").select do |frame|
+                  frame.mime_type == "image/jpeg"
+                end.map(&:picture)
+              end
+            end.flatten
+          when :folders
+            images += paths.map(&:parent).uniq.map do |folder|
+              Pathname.glob(folder + "*.jpg").map do |path|
+                path.open("rb").read
+              end
+            end.flatten
+          when :itunes
+            begin
+              term = ERB::Util.url_encode "#{tpe2} #{talb}"
+              uri = URI.parse "https://itunes.apple.com/search?term=#{term}&country=US&media=music&entity=album&limit=2"
+              search = JSON.parse Net::HTTP.get(uri)
+              images += search["results"].map do |result|
+                result["artworkUrl100"]
+              end.compact.map do |url|
+                URI.parse url.sub(/\.100x100-75.jpg$/, ".600x600-85.jpg")
+              end.map do |uri|
+                Net::HTTP.get uri
+              end
+            rescue StandardError
+            end
+          end
+        end if talb
+        images.uniq!
+        tags.each do |frames|
+          frames["APIC"] = images
+        end
+      end if sources.any?
+      tracks.select do |path, frames|
+        frames["TALB"]
+      end.group_by do |path, frames|
+        frames.values_at *%w[TPE2 TALB TPOS]
+      end.sort_by(&:key_to_s).skipping_each_with_page do |(values, group), *pages|
+        paths, tags = group.transpose
+        apic = tags.first["APIC"]
+        pane.clear
+        labels = [ "preview", "album artist", "album title", "disc" ]
+        vals = [ preview.url, *values ]
+        margin = labels.map(&:length).max + 1
+        labels.zip(vals).each.with_index do |line, index|
+          pane.setpos index, 0
+          pane.addstr "%#{margin}s: %s" % line
+        end
+        editbox = pane.subwin 1, 0, 4 + pane.begy, 15 + pane.begx
+        selected = 0
+        loop do
+          preview.set apic[selected]
+          pane.setpos 4, 0
+          pane.addstr "%#{margin}s:" % "image"
+          apic.each.with_index do |image, index|
+            pane::attron  Curses::color_pair(Curses::COLOR_GREEN)|Curses::A_BOLD if index == selected
+            pane.addstr " #{index + 1}"
+            pane::attroff Curses::color_pair(Curses::COLOR_GREEN)|Curses::A_BOLD if index == selected
+          end
+          pane.clrtoeol
+          pane.refresh
+          show_page(page, *pages)
+          case character = Curses.getch
+          when *PREV_EDIT then break -1
+          when *NEXT_EDIT then break +1
+          when *PREV_PANE, *NEXT_PANE, *QUIT
+            Curses.ungetch character
+            break
+          when Curses::KEY_LEFT
+            selected = (selected - 1) % apic.length if apic.any?
+          when Curses::KEY_RIGHT
+            selected = (selected + 1) % apic.length if apic.any?
+          when Curses::KEY_DC
+            apic.delete_at selected if apic.any?
+            selected -= 1 if apic.any? && selected >= apic.length
+          when Curses::KEY_ENTER, ?\n.ord, ?\f.ord
+            if apic.any?
+              apic.replace [ apic[selected] ]
+              selected = 0
+            end
+          when String
+            Curses.ungetch character
+            case url = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PANE, *NEXT_PANE, *QUIT)
+            when *PREV_EDIT then break -1
+            when *NEXT_EDIT then break +1
+            when *PREV_PANE, *NEXT_PANE, *QUIT
+              Curses.ungetch character
+              break
+            else
+              begin
+                left_text editbox, "downloading..."
+                uri = URI.parse url
+                response = Net::HTTP.start(uri.host, uri.port, :use_ssl => uri.scheme == 'https') do |http|
+                  http.get(uri.path)
+                end
+                if response["content-type"] == "image/jpeg"
+                  apic << response.body
+                  selected = apic.length - 1
+                end
+              rescue StandardError
+              end
+            end
+          end
+        end.tap do |direction|
+          preview.set nil
+          tags.each do |frames|
+            frames["APIC"] = apic
+          end
+          raise StopIteration unless direction
+        end
+      end
+    when :replay_gain
+      loop do
+        replay_gain_ids = %w[REPLAYGAIN_TRACK_GAIN REPLAYGAIN_TRACK_PEAK REPLAYGAIN_ALBUM_GAIN REPLAYGAIN_ALBUM_PEAK]
+        all = tracks.group_by do |path, frames|
+          frames.values_at *%w[TPE2 TALB TPOS]
+        end.map do |(tpe2, talb, tpos), group|
+          [ talb ? true : false, group ]
+        end
+        outstanding = all.reject do |is_album, group|
+          ids = replay_gain_ids.take(is_album ? 4 : 2)
+          group.all? do |path, frames|
+            frames["TXXX"] && frames["TXXX"].values_at(*ids).all?
+          end
+        end
+        count = outstanding.count
+        message = count > 0 ?
+          "gain calculations outstanding for #{outstanding.count} album#{?s if outstanding.count > 1} - Y to calculate" :
+          "all track and album gains are up to date - Y to recalculate"
+        break unless wait_key(pane, message, /Y/i, *NEXT_PANE, *PREV_PANE, *QUIT)
+        pane.clear
+        cpus = %x[nproc].to_i rescue 1
+        Dir.mktmpdir do |tmpdir|
+          tmpdir = Pathname.new tmpdir
+          (outstanding.any? ? outstanding : all).progress(bar, "calculating replay gains").with_index.inject([{}, []]) do |(jobs, results), ((is_album, group), album_index)|
+            while jobs.count >= cpus
+              results << jobs.delete(Process.waitpid)
+              results.last.last.each &:delete
+            end
+            paths, tags = group.transpose
+            temps = paths.map.with_index do |path, track_index|
+              tmpdir + "#{album_index}.#{track_index}.mp3"
+            end
+            tsv_path = tmpdir + "#{album_index}.tsv"
+            paths.zip(temps).each do |path, temp|
+              FileUtils.cp path, temp
+            end
+            system "mp3gain", "-q", "-u", *temps.map(&:to_s)  # undo any applied gain
+            pid = Process.spawn "mp3gain", "-q", "-o", "-k", "-s", "s", *temps.map(&:to_s), :out => tsv_path.to_s
+            jobs[pid] = [ tags, is_album, tsv_path, temps ]
+            [ jobs, results ]
+          end.tap do |jobs, results|
+            while jobs.any?
+              results << jobs.delete(Process.waitpid)
+            end
+          end.last.each do |tags, is_album, tsv_path, temps|
+            header, *rows = CSV.parse tsv_path.read, :col_sep => ?\t
+            *lines, (album_gain, album_peak) = rows.map do |cols|
+              [ cols[2] && cols[2].to_f, cols[3] && cols[3].to_f / (2**15 - 1) ]
+            end
+            lines.zip(tags).each do |(track_gain, track_peak), frames|
+              formats = [ "%.2f dB", "%.6f", "%.2f dB", "%.6f" ]
+              values = [ track_gain, track_peak, album_gain, album_peak ]
+              frames["TXXX"] ||= {}
+              replay_gain_ids.zip(formats, values).take(is_album ? 4 : 2).select(&:last).each do |id, format, value|
+                frames["TXXX"][id] = format % value
+              end
+            end
+          end
+        end
+      end
+    when :rename
+      case
+      when !options[:to]
+        wait_key pane, "no output folder specified", nil, *NEXT_PANE, *PREV_PANE, *QUIT
+      when wait_key(pane, "press Y to rename and retag MP3 files to #{options[:to]}", /Y/i, *NEXT_PANE, *PREV_PANE, *QUIT)
+        Dir.mktmpdir do |tmpdir|
+          tmpdir = Pathname.new tmpdir
+          tracks.map do |path, frames|
+            tpe1, tpe2, talb, tpos, trck, tit2 = frames.values_at *%w[TPE1 TPE2 TALB TPOS TRCK TIT2]
+            artist_part = tpe2 || tpe1
+            album_part = [ talb, tpos && "(Disc #{tpos})" ].compact.join(?\s) if talb
+            track_part = trck ? "%02d %s.mp3" % [ trck.to_i, tit2 ] : "#{tit2}.mp3"
+            new_path = [ artist_part, album_part, track_part ].compact.map(&:to_safe_filename).inject(options[:to], &:join)
+            [ path, new_path, frames]
+          end.group_by do |path, new_path, frames|
+            new_path.parent
+          end.reject do |folder, group|
+            paths, new_paths, tags = group.transpose
+            folder.exist? && begin
+              conflict_message = new_paths.any?(&:exist?) ?
+                "conflicting directory and files already exist:" :
+                "conflicting directory already exists:"
+              lines = [
+                conflict_message, folder.to_s, "",
+                "Y to skip directory, N to proceed"
+              ]
+              wait_key(pane, lines, /[YN]/i) =~ /Y/i
+            end
+          end.progress(bar, "copying cover art").each do |folder, group|
+            paths, new_paths, tags = group.transpose
+            image_path = folder + "folder.jpg"
+            tags.map do |frames|
+              frames["APIC"]
+            end.inject([], &:|).take(1).each do |image|
+              FileUtils.mkdir_p image_path.parent
+              image_path.open("wb") { |file| file << image }
+            end
+          end.map(&:last).flatten(1).progress(bar, "renaming & tagging MP3 files").each do |path, new_path, frames|
+            temp_path = tmpdir + new_path.basename
+            FileUtils.cp path, temp_path
+            system "mp3gain", "-q", "-p", "-u", temp_path.to_s  # undo any applied gain
+            TagLib::MPEG::File.open(temp_path.to_s) do |mp3|
+              mp3.strip TagLib::MPEG::File::AllTags
+              tag = mp3.id3v2_tag(true)
+              frames.values_at(*WRITE_IDS).zip(WRITE_IDS).select(&:first).map do |value, id|
+                case id
+                when "TXXX"
+                  value.map do |description, text|
+                    TagLib::ID3v2::UserTextIdentificationFrame.new(TagLib::String::UTF8).tap do |txxx|
+                      txxx.description = description
+                      txxx.text = text
+                    end
+                  end
+                when "APIC"
+                  value.take(options[:apic] ? 1 : 0).map do |image|
+                    TagLib::ID3v2::AttachedPictureFrame.new.tap do |apic|
+                      apic.text_encoding = TagLib::String::UTF8
+                      apic.mime_type = "image/jpeg"
+                      apic.type = TagLib::ID3v2::AttachedPictureFrame::FrontCover
+                      apic.picture = image
+                    end
+                  end
+                else
+                  TagLib::ID3v2::TextIdentificationFrame.new(id, TagLib::String::UTF8).tap do |frame|
+                    frame.text = value
+                  end
+                end
+              end.flatten.each do |frame|
+                tag.add_frame frame
+              end
+              mp3.save
+            end
+            FileUtils.mkdir_p new_path.parent
+            FileUtils.mv temp_path, new_path
+          end
+        end
+        raise StopIteration
+      end
+    end
+    
+    case action
+    when :album_artist
+      tracks.group_by do |path, frames|
+        [ path.parent, frames["TPE2"] ]
+      end.sort_by(&:key_to_s).map do |(folder, tpe2), group|
+        paths, tags = group.transpose
+        suggested = case tpe2
+        when "Various Artists" then nil
+        when nil, ""
+          tpe1 = group.map do |path, frames|
+            frames["TPE1"]
+          end.compact.reject(&:empty?).uniq
+          case
+          when tpe1.none? then nil
+          when tpe1 == [ "Various Artists" ] then nil
+          when tpe1.one? then tpe1.first.proper_noun
+          else nil
+          end
+        else tpe2.proper_noun
+        end
+        [ tags, "album artist", { :old => tpe2, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first }, { :suggest => :proper_noun } ]
+      end
+    when :album_title
+      tracks.group_by do |path, frames|
+        [ frames["TPE2"], frames["TALB"], path.parent ]
+      end.sort_by(&:key_to_s).map do |(tpe2, talb, folder), group|
+        paths, tags = group.transpose
+        suggested = talb.titlecase if talb
+        [ tags, "album title", { :old => talb, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first, "album artist" => tpe2 }, { :suggest => :titlecase } ]
+      end
+    when :album_year
+      tracks.select do |path, frames|
+        frames["TALB"]
+      end.group_by do |path, frames|
+        [ frames["TPE2"], frames["TALB"], frames["TDOR"], path.parent ]
+      end.sort_by(&:key_to_s).map do |(tpe2, talb, tdor, folder), group|
+        paths, tags = group.transpose
+        suggested = tags.map do |frames|
+          frames.values_at *%w[TDOR TORY TDRC TYER]
+        end.flatten.compact.map(&:strip).uniq.push(folder.basename.to_s).join(?\s).scan(/19\d\d|20\d\d/).first
+        [ tags, "album year", { :old => tdor, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first, "album artist" => tpe2, "album title" => talb }, { :can_be_empty => talb.nil? } ]
+      end
+    when :disc_number
+      tracks.select do |path, frames|
+        frames["TALB"]
+      end.group_by do |path, frames|
+        frames.values_at *%w[TPE2 TALB]
+      end.sort_by(&:key_to_s).map do |(tpe2, talb), group|
+        discs = group.group_by do |path, frames|
+          [ path.parent, frames["TPOS"] ]
+        end
+        discs.map do |(folder, tpos), group|
+          paths, tags = group.transpose
+          suggested = case
+          when discs.one? then nil
+          when tpos then tpos.split(?/).first
+          when folder.basename.to_s[/dis[ck] (\d)[\)\]]?$/i] then $1
+          else nil
+          end
+          [ tags, "disc number", { :old => tpos, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first, "album artist" => tpe2, "album title" => talb }, { :can_be_empty => true } ]
+        end
+      end.flatten(1)
+    when :track_artist
+      tracks.group_by do |path, frames|
+        [ frames["TPE2"], frames["TALB"], frames["TPE1"], path.parent ]
+      end.sort_by(&:key_to_s).map do |(tpe2, talb, tpe1, folder), group|
+        case
+        when tpe2 && tpe2 == tpe1 then []
+        when tpe1
+          paths, tags = group.transpose
+          suggested = tpe1.proper_noun
+          path = group.one? ? group.first.first : folder
+          [ [ tags, "track artist", { :old => tpe1, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :proper_noun } ] ]
+        when tpe2 then []
+        else
+          group.map do |path, frames|
+            [ [ frames ], "track artist", { :old => nil, :suggested => nil }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :proper_noun } ]
+          end
+        end
+      end.flatten(1)
+    when :track_number
+      tracks.select do |path, frames|
+        frames["TALB"] && !frames["TRCK"]
+      end.sort_by do |path, frames|
+        [ frames["TPE2"], frames["TALB2"], frames["TPOS"], path ].map &:to_s
+      end.map do |path, frames|
+        tpe2, talb, tpos = frames.values_at *%w[TPE2 TALB TPOS]
+        suggested = path.basename.to_s[/^\d+/]
+        suggested = suggested.to_i.to_s if suggested
+        [ [ frames ], "track number", { :old => nil, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos }, { :can_be_empty => talb.nil? } ]
+      end
+    when :track_title
+      tracks.sort_by do |path, frames|
+        [ frames["TPE2"].to_s, frames["TALB"].to_s, frames["TPOS"].to_s, frames["TRCK"].to_i ]
+      end.progress(bar, "checking tags").map do |path, frames|
+        tpe2, talb, tpos, trck, tit2 = frames.values_at *%w[TPE2 TALB TPOS TRCK TIT2]
+        suggested = tit2 || path.basename(path.extname).to_s.match(/^\d{0,2}[\W_]*(.*)/) { $1 }
+        suggested = suggested.strip.titlecase if suggested
+        [ [ frames ], "track title", { :old => tit2, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos, "track number" => trck }, { :suggest => :titlecase } ]
+      end
+    when :compilation
+      tracks.select do |path, frames|
+        frames["TALB"] && !frames["TPE2"]
+      end.group_by do |path, frames|
+        [ frames["TALB"], path.parent ]
+      end.sort_by(&:key_to_s).map do |(talb, folder), group|
+        paths, tags = group.transpose
+        tpe1s = tags.group_by do |frames|
+          frames["TPE1"]
+        end
+        suggested = tpe1s.many? ? "Y" : nil
+        [ tags, "compilation", { :old => nil, :suggested => suggested }, { "path" => folder, "album title" => talb }, { :can_be_empty => true } ]
+      end
+    else []
+    end.tap do |edits|
+      case action
+      when :cover_art, :replay_gain, :rename
+      else
+        wait_key(pane, "no action required", nil, *PREV_PANE, *NEXT_PANE, *QUIT) if edits.none?
+      end
+    end.skipping_each_with_page do |(tags, label, values, context, options), *pages|
+      options ||= {}
+      fields = context.to_a
+      current = values.key?(:new) ? values[:new] : values[:old]
+      fields << [ label, values[:old], current ]
+      if current == values[:suggested]
+        fields << [ nil ]
+      else
+        fields << [ "suggested", current, values[:suggested] ]
+      end
+      fields << [ "accept/edit", nil ]
+      fields.each { |line| line.map! &:to_s }
+      column_width = fields.map(&:first).map(&:length).max + 1
+      pane.clear
+      fields.each.with_index do |(prompt, *value), index|
+        pane.setpos index, 0
+        (column_width - prompt.length).times { pane.addch ' ' }
+        pane.attron  Curses::A_BOLD if index == context.count
+        pane.addstr prompt
+        pane.attroff Curses::A_BOLD if index == context.count
+        case
+        when value.none?
+        when value.one?
+          pane.addstr ": "
+          pane.addstr *value
+        else
+          pane.addstr ": "
+          Diff::LCS.traverse_sequences(*value) do |change|
+            case change.action
+            when ?- 
+            when ?=
+              pane.addstr change.new_element
+            when ?+
+              pane::attron  Curses::color_pair(Curses::COLOR_GREEN)|Curses::A_BOLD
+              pane.addstr change.new_element
+              pane::attroff Curses::color_pair(Curses::COLOR_GREEN)|Curses::A_BOLD
+            end
+          end
+          if !options[:can_be_empty] && index == context.length && value.last.empty?
+            pane::attron  Curses::color_pair(Curses::COLOR_RED)|Curses::A_BOLD
+            pane.addch ?-
+            pane::attroff Curses::color_pair(Curses::COLOR_RED)|Curses::A_BOLD
+          end
+        end
+      end
+      pane.refresh
+      show_page(page, *pages)
+      editbox = pane.subwin 1, 0, pane.cury + pane.begy, pane.curx + pane.begx
+      case string = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PANE, *NEXT_PANE, *QUIT)
+      when *PREV_EDIT then -1
+      when *NEXT_EDIT then +1
+      when *PREV_PANE, *NEXT_PANE, *QUIT
+        Curses.ungetch string
+        raise StopIteration
+      when ""
+        values[:new] = values[:suggested]
+        values[:new] == current ? +1 : 0
+      when ?-
+        values[:new] = nil
+        values[:suggested] = nil
+        0
+      else
+        values[:new] = string
+        values[:suggested] = string.send(options[:suggest] || :to_s)
+        0
+      end
+    end.each do |tags, label, values, context|
+      tags.each do |frames|
+        case action
+        when :compilation
+          if values.key? :new
+            frames["TXXX"] ||= {}
+            if values[:new].to_s[/^[Yy1]/]
+              frames["TXXX"]["COMPILATION"] = "1"
+            else
+              frames["TXXX"].delete "COMPILATION"
+            end
+          end
+        when :album_artist
+          if values.key? :new
+            if values[:new]
+              frames["TPE1"] = values[:new] if frames["TPE1"] == frames["TPE2"]
+              frames["TPE2"] = values[:new]
+            else
+              frames.delete "TPE2"
+            end
+          end
+        else
+          values[:new] ? frames[frame_id] = values[:new] : frames.delete(frame_id) if values.key?(:new)
+        end
+      end
+    end
+    
+    case Curses.getch
+    when *PREV_PANE then -1
+    when *NEXT_PANE then +1
+    when *QUIT then raise StopIteration
+    end
+  end
+  save = true
+rescue Interrupt
+  save = true
+ensure
+  preview.stop
+  Curses.echo
+  Curses.close_screen
+  case
+  when !save
+  when TTY
+    paths, tags = tracks.transpose
+    yaml = Hash[paths.map(&:to_s).zip tags].to_yaml
+    TTY.puts yaml
+  else
+    $stdout << "saving tags to '#{ARGF.filename}' ... "
+    paths, tags = tracks.transpose
+    yaml = Hash[paths.map(&:to_s).zip tags].to_yaml
+    File.open(ARGF.filename, "w") { |file| file << yaml }
+    $stdout.puts "done"
+  end
+end
