@@ -816,9 +816,13 @@ begin
         end
       end.flatten(1)
     when :track_number
-      tracks.select do |path, frames|
-        frames["TALB"] && !frames["TRCK"]
-      end.sort_by do |path, frames|
+      tracks.group_by do |path, frames|
+        frames["TALB"]
+      end.reject do |talb, group|
+        !talb || group.all? do |path, frames|
+          frames["TRCK"]
+        end
+      end.map(&:last).flatten(1).sort_by do |path, frames|
         [ frames["TPE2"], frames["TALB2"], frames["TPOS"], path ].map &:to_s
       end.map do |path, frames|
         tpe2, talb, tpos = frames.values_at *%w[TPE2 TALB TPOS]
