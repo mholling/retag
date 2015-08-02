@@ -835,10 +835,10 @@ begin
       tracks.sort_by do |path, frames|
         [ frames["TPE2"].to_s, frames["TALB"].to_s, frames["TPOS"].to_s, frames["TRCK"].to_i ]
       end.progress(bar, "checking tags").map do |path, frames|
-        tpe2, talb, tpos, trck, tit2 = frames.values_at *%w[TPE2 TALB TPOS TRCK TIT2]
+        tpe2, talb, tpos, trck, tpe1, tit2 = frames.values_at *%w[TPE2 TALB TPOS TRCK TPE1 TIT2]
         suggested = tit2 || path.basename(path.extname).to_s.match(/^\d{0,2}[\W_]*(.*)/) { $1 }
         suggested = suggested.strip.titlecase if suggested
-        [ [ frames ], "track title", { :old => tit2, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos, "track number" => trck }, { :suggest => :titlecase } ]
+        [ [ frames ], "track title", { :old => tit2, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos, "track number" => trck, "track artist" => tpe1 }, { :suggest => :titlecase } ]
       end
     when :compilation
       tracks.select do |path, frames|
