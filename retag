@@ -44,13 +44,11 @@ QUIT      = ?\e.ord
 ALL_KEYS = Curses::Key.constants.map { |symbol| Curses::Key.const_get symbol }
 
 class String
-  ARTICLES     = %w[a and the]
+  ARTICLES     = %w[a an and the]
   CONJUNCTIONS = %w[and as but for nor or so yet]
   PREPOSITIONS = %w[amid at but by down for from in into near of off on onto out over past with till to unto up upon with]
   TITLECASE_EXCEPTIONS = ARTICLES | CONJUNCTIONS | PREPOSITIONS
   PHRASAL_VERBS = %w[Beat Up Blow Out Blow Up Break Down Break Into Break Up Bring Up Call Off Call On Call Up Carry On Come Back Come Down Come On Come Out Come Over Do Over Fill In Fill Out Find Out Get Along Get Around Get By Get Over Get Through Get Up Give Back Give Up Go Along Go Away Go On Go Over Hand In Hang Up Hold On Keep On Keep Up Leave Out Let Down Look For Look Into Look Like Look Out Look Over Look Up Make Out Make Up Pack Up Pass Out Pick Out Pick Up Put Away Put Off Put On Put Out Put Up Roll Over Run Into Run Out Run Over Show Up Take After Take Back Take Off Take On Take Up Talk Back Talk Over Throw Away Try On Turn Down Turn In Turn Off Turn On Use Up Wait On].map(&:downcase).each_slice(2)
-  
-  PROPER_NOUN_EXCEPTIONS = %w[and the of]
   
   def capitalise
     split(/(^'|^"|^\(|^\[|\/|-)/).reject(&:empty?).map do |part|
@@ -62,24 +60,22 @@ class String
     replace capitalise
   end
   
-  [ [ :proper_noun, PROPER_NOUN_EXCEPTIONS, [] ], [ :titlecase, TITLECASE_EXCEPTIONS, PHRASAL_VERBS ] ].each do |method, exceptions, pairs|
-    define_method(method) do
-      split(?\s).map do |word|
-        word =~ /[a-z]/ ? word.downcase : word
-      end.tap do |words|
-        words.zip(words.rotate).each.with_index do |pair, index|
-          case pair
-          when *pairs then words[index,2].each &:capitalise! unless index == words.length - 1
-          end
-          case pair.first
-          when *exceptions
-          else words[index].capitalise!
-          end
+  def titlecase
+    split(?\s).map do |word|
+      word =~ /[a-z]|^.$/ ? word.downcase : word
+    end.tap do |words|
+      words.zip(words.rotate).each.with_index do |pair, index|
+        case pair
+        when *PHRASAL_VERBS then words[index,2].each &:capitalise! unless index == words.length - 1
         end
-        words[0].capitalise!
-        words[-1].capitalise!
-      end.join ?\s
-    end
+        case pair.first
+        when *TITLECASE_EXCEPTIONS
+        else words[index].capitalise!
+        end
+      end
+      words[0].capitalise!
+      words[-1].capitalise!
+    end.join ?\s
   end
   
   def to_safe_filename
@@ -419,6 +415,7 @@ begin
     Curses.refresh
     bar  = pane.subwin 1, pane.maxx - 4,     pane.cury + pane.begy, 2 + pane.begx
     page = pane.subwin 1, pane.maxx - 4, 9 + pane.cury + pane.begy, 2 + pane.begx
+    centre_text bar, "checking tags..."
     
     case action
     when :read_tags
@@ -753,12 +750,12 @@ begin
           case
           when tpe1.none? then nil
           when tpe1 == [ "Various Artists" ] then nil
-          when tpe1.one? then tpe1.first.proper_noun
+          when tpe1.one? then tpe1.first.titlecase
           else nil
           end
-        else tpe2.proper_noun
+        else tpe2.titlecase
         end
-        [ tags, "album artist", { :old => tpe2, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first }, { :suggest => :proper_noun } ]
+        [ tags, "album artist", { :old => tpe2, :suggested => suggested }, { "path" => group.many? ? folder : group.first.first }, { :suggest => :titlecase } ]
       end
     when :album_title
       tracks.group_by do |path, frames|
@@ -808,13 +805,13 @@ begin
         when tpe2 && tpe2 == tpe1 then []
         when tpe1
           paths, tags = group.transpose
-          suggested = tpe1.proper_noun
+          suggested = tpe1.titlecase
           path = group.one? ? group.first.first : folder
-          [ [ tags, "track artist", { :old => tpe1, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :proper_noun } ] ]
+          [ [ tags, "track artist", { :old => tpe1, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :titlecase } ] ]
         when tpe2 then []
         else
           group.map do |path, frames|
-            [ [ frames ], "track artist", { :old => nil, :suggested => nil }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :proper_noun } ]
+            [ [ frames ], "track artist", { :old => nil, :suggested => nil }, { "path" => path, "album artist" => tpe2, "album title" => talb }, { :suggest => :titlecase } ]
           end
         end
       end.flatten(1)
