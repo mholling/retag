@@ -450,6 +450,7 @@ begin
         frames.delete "TPOS"
         frames.delete "TRCK"
         frames.delete "TPE2"
+        frames["TXXX"].delete "COMPILATION" if frames["TXXX"]
       end
     when :track_artist
       tracks.select do |path, frames|
@@ -841,7 +842,7 @@ begin
       end
     when :compilation
       tracks.select do |path, frames|
-        frames["TALB"] && !frames["TPE2"]
+        frames["TALB"] && (!frames["TPE2"] || (frames["TXXX"] && frames["TXXX"]["COMPILATION"]))
       end.group_by do |path, frames|
         [ frames["TALB"], path.parent ]
       end.sort_by(&:key_to_s).map do |(talb, folder), group|
@@ -850,7 +851,10 @@ begin
           frames["TPE1"]
         end
         suggested = tpe1s.many? ? "Y" : nil
-        [ tags, "compilation", { :old => nil, :suggested => suggested }, { "path" => folder, "album title" => talb }, { :can_be_empty => true } ]
+        comp = tags.all? do |frames|
+          frames["TXXX"] && frames["TXXX"]["COMPILATION"]
+        end ? "Y" : nil
+        [ tags, "compilation", { :old => comp, :suggested => suggested }, { "path" => folder, "album title" => talb }, { :can_be_empty => true } ]
       end
     else []
     end.tap do |edits|
