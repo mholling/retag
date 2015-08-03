@@ -125,7 +125,6 @@ def get_string(window, *special_keys)
         index += 1
       end
     end
-      %x[echo "#{character.to_s}" >> blah.txt]
   end
   characters.join
 ensure
