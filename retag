@@ -37,6 +37,8 @@ WRITE_IDS = %w[TPE2 TALB TDOR                TPOS TPE1 TRCK TIT2 TXXX APIC]
 
 PREV_EDIT = [ Curses::KEY_UP, Curses::KEY_BTAB ]
 NEXT_EDIT = [ Curses::KEY_DOWN, ?\t.ord ]
+PREV_PAGE = Curses::KEY_SR
+NEXT_PAGE = Curses::KEY_SF
 PREV_PANE = Curses::KEY_PPAGE
 NEXT_PANE = Curses::KEY_NPAGE
 QUIT      = ?\e.ord
@@ -123,6 +125,7 @@ def get_string(window, *special_keys)
         index += 1
       end
     end
+      %x[echo "#{character.to_s}" >> blah.txt]
   end
   characters.join
 ensure
@@ -209,10 +212,8 @@ module Skipping
     index = 0
     begin
       break unless count > 0
-      case yield to_a[index]
-      when -1 then index = [ index - 1, 0 ].max
-      when  0
-      when +1 then index = [ index + 1, count - 1 ].min
+      case (increment = yield to_a[index])
+      when Fixnum then index = [ [ index + increment, 0 ].max, count - 1 ].min
       end
     rescue StopIteration
       break
@@ -547,6 +548,8 @@ begin
           case character = Curses.getch
           when *PREV_EDIT then break -1
           when *NEXT_EDIT then break +1
+          when *PREV_PAGE then break -10
+          when *NEXT_PAGE then break +10
           when *PREV_PANE, *NEXT_PANE, *QUIT
             Curses.ungetch character
             break
@@ -564,9 +567,11 @@ begin
             end
           when String
             Curses.ungetch character
-            case url = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PANE, *NEXT_PANE, *QUIT)
+            case url = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PAGE, *NEXT_PAGE, *PREV_PANE, *NEXT_PANE, *QUIT)
             when *PREV_EDIT then break -1
             when *NEXT_EDIT then break +1
+            when *PREV_PAGE then break -10
+            when *NEXT_PAGE then break +10
             when *PREV_PANE, *NEXT_PANE, *QUIT
               Curses.ungetch character
               break
@@ -909,9 +914,11 @@ begin
       pane.refresh
       show_page(page, *pages)
       editbox = pane.subwin 1, 0, pane.cury + pane.begy, pane.curx + pane.begx
-      case string = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PANE, *NEXT_PANE, *QUIT)
+      case string = get_string(editbox, *PREV_EDIT, *NEXT_EDIT, *PREV_PAGE, *NEXT_PAGE, *PREV_PANE, *NEXT_PANE, *QUIT)
       when *PREV_EDIT then -1
       when *NEXT_EDIT then +1
+      when *PREV_PAGE then -10
+      when *NEXT_PAGE then +10
       when *PREV_PANE, *NEXT_PANE, *QUIT
         Curses.ungetch string
         raise StopIteration
