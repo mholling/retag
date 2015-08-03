@@ -664,11 +664,18 @@ begin
       when wait_key(pane, "press Y to rename and retag MP3 files to #{options[:to]}", /Y/i, *NEXT_PANE, *PREV_PANE, *QUIT)
         Dir.mktmpdir do |tmpdir|
           tmpdir = Pathname.new tmpdir
-          tracks.map do |path, frames|
+          tracks.group_by do |path, frames|
+            frames.values_at %w[TPE2 TALB TPOS]
+          end.map do |values, group|
+            digits = group.map do |path, frames|
+              frames["TRCK"].to_i
+            end.max.to_s.length
+            group.map { digits }.zip *group.transpose
+          end.flatten(1).map do |digits, path, frames|
             tpe1, tpe2, talb, tpos, trck, tit2 = frames.values_at *%w[TPE1 TPE2 TALB TPOS TRCK TIT2]
             artist_part = tpe2 || "Singles"
             album_part = [ talb, tpos && "Disc #{tpos}" ].compact.join(?\s) if talb
-            track_part = talb ? trck ? "%02d %s.mp3" % [ trck.to_i, tit2 ] : "#{tit2}.mp3" : "#{tpe1} - #{tit2}.mp3"
+            track_part = talb ? trck ? "%0#{digits}d %s.mp3" % [ trck.to_i, tit2 ] : "#{tit2}.mp3" : "#{tpe1} - #{tit2}.mp3"
             new_path = [ artist_part, album_part, track_part ].compact.map(&:to_safe_filename).inject(options[:to], &:join)
             [ path, new_path, frames]
           end.group_by do |path, new_path, frames|
