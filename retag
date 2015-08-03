@@ -84,7 +84,7 @@ end
 def get_string(window, *special_keys)
   Curses.curs_set 1
   window.keypad = true
-  characters, index, byte = [], 0, nil
+  characters, index, bytes = [], 0, []
   while true
     window.clear
     index = [ index, window.maxx ].min
@@ -114,9 +114,9 @@ def get_string(window, *special_keys)
     when *ALL_KEYS
     when String, Fixnum
       if Fixnum === character && character > 31
-        if byte then character, byte = [ byte, character ].pack('CC').force_encoding('utf-8'), nil
-        else byte = character
-        end
+        bytes << character
+        character = bytes.pack('C*').force_encoding('utf-8')
+        character.valid_encoding? ? bytes = [] : character = nil
       end
       if String === character && index < window.maxx - 1
         characters.insert index, character
