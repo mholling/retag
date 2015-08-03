@@ -62,7 +62,7 @@ class String
   end
   
   def titlecase
-    strip.split(/(^['"\[\(]|^Mac|^Mc| ['"\[\(]?|\/|-| Mac| Mc)/i).map do |word|
+    strip.split(/(^['"\[\(]|^Mac|^Mc|^O'| ['"\[\(]?|\/|-| Mac| Mc| O')/i).map do |word|
       word =~ /.+[A-Z]/ ? word : word.downcase
     end.each do |word|
       case word
