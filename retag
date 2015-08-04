@@ -674,7 +674,7 @@ begin
             group.map { digits }.zip *group.transpose
           end.flatten(1).map do |digits, path, frames|
             tpe1, tpe2, talb, tpos, trck, tit2 = frames.values_at *%w[TPE1 TPE2 TALB TPOS TRCK TIT2]
-            artist_part = tpe2 || "Singles"
+            artist_part = tpe2 ? tpe2 : talb ? "Compilations" : "Singles"
             album_part = [ talb, tpos && "Disc #{tpos}" ].compact.join(?\s) if talb
             track_part = talb ? trck ? "%0#{digits}d %s.mp3" % [ trck.to_i, tit2 ] : "#{tit2}.mp3" : "#{tpe1} - #{tit2}.mp3"
             new_path = [ artist_part, album_part, track_part ].compact.map(&:to_safe_filename).inject(options[:to], &:join)
