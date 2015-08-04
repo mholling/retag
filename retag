@@ -663,6 +663,7 @@ begin
         wait_key pane, "no output folder specified", nil, *NEXT_PANE, *PREV_PANE, *QUIT
       when wait_key(pane, "press Y to rename and retag MP3 files to #{options[:to]}", /Y/i, *NEXT_PANE, *PREV_PANE, *QUIT)
         Dir.mktmpdir do |tmpdir|
+          centre_text bar, "checking for file conflicts..."
           tmpdir = Pathname.new tmpdir
           tracks.group_by do |path, frames|
             frames.values_at %w[TPE2 TALB TPOS]
