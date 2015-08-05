@@ -683,16 +683,20 @@ begin
             new_path.parent
           end.reject do |folder, group|
             paths, new_paths, tags = group.transpose
-            folder.exist? && begin
-              conflict_message = new_paths.any?(&:exist?) ?
-                "conflicting directory and files already exist:" :
-                "conflicting directory already exists:"
-              lines = [
-                conflict_message, folder.to_s, "",
-                "Y to skip directory, N to proceed"
-              ]
-              wait_key(pane, lines, /[YN]/i) =~ /Y/i
+            conflicts = []
+            if folder.exist?
+              if new_paths.any?(&:exist?)
+                conflicts << "conflicting directory and files already exist:" << folder.to_s
+              else
+                conflicts << "conflicting directory already exists:" << folder.to_s
+              end
             end
+            new_paths.group_by(&:to_s).select? do |new_path, new_path_group|
+              new_path_group.count > 1
+            end.each do |new_path, new_path_group|
+              conflicts << "duplicate sources for target track:" << new_path
+            end
+            conflicts.any? && wait_key(pane, *conflicts, "", "Y to skip directory, N to proceed", /[YN]/i) =~ /Y/i
           end.progress(bar, "copying cover art").each do |folder, group|
             paths, new_paths, tags = group.transpose
             image_path = folder + "folder.jpg"
