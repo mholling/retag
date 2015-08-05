@@ -832,18 +832,23 @@ begin
       end.flatten(1)
     when :track_number
       tracks.group_by do |path, frames|
-        frames["TALB"]
-      end.reject do |talb, group|
-        !talb || group.all? do |path, frames|
+        frames.values_at *%w[TALB TPOS]
+      end.select do |(talb, tpos), group|
+        talb
+      end.map(&:last).reject do |group|
+        paths, tags = group.transpose
+        trcks = tags.map do |frames|
           frames["TRCK"]
         end
-      end.map(&:last).flatten(1).sort_by do |path, frames|
-        [ frames["TPE2"], frames["TALB2"], frames["TPOS"], path ].map &:to_s
+        numbers = trcks.map(&:to_i)
+        trcks.all? && numbers.sort == Array(1..numbers.count)
+      end.flatten(1).sort_by do |path, frames|
+        [ frames["TPE2"], frames["TALB"], frames["TPOS"], path ].map &:to_s
       end.map do |path, frames|
-        tpe2, talb, tpos = frames.values_at *%w[TPE2 TALB TPOS]
-        suggested = path.basename.to_s[/^\d+/]
+        tpe2, talb, tpos, trck = frames.values_at *%w[TPE2 TALB TPOS TRCK]
+        suggested = trck || path.basename.to_s[/^\d+/]
         suggested = suggested.to_i.to_s if suggested
-        [ [ frames ], "track number", { :old => nil, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos }, { :can_be_empty => talb.nil? } ]
+        [ [ frames ], "track number", { :old => trck, :suggested => suggested }, { "path" => path, "album artist" => tpe2, "album title" => talb, "disc" => tpos }, { :can_be_empty => talb.nil? } ]
       end
     when :track_title
       tracks.sort_by do |path, frames|
