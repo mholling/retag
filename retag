@@ -666,7 +666,7 @@ begin
           centre_text bar, "checking for file conflicts..."
           tmpdir = Pathname.new tmpdir
           tracks.group_by do |path, frames|
-            frames.values_at %w[TPE2 TALB TPOS]
+            frames.values_at *%w[TPE2 TALB TPOS]
           end.map do |values, group|
             digits = group.map do |path, frames|
               frames["TRCK"].to_i
@@ -691,12 +691,12 @@ begin
                 conflicts << "conflicting directory already exists:" << folder.to_s
               end
             end
-            new_paths.group_by(&:to_s).select? do |new_path, new_path_group|
+            new_paths.group_by(&:to_s).select do |new_path, new_path_group|
               new_path_group.count > 1
             end.each do |new_path, new_path_group|
               conflicts << "duplicate sources for target track:" << new_path
             end
-            conflicts.any? && wait_key(pane, *conflicts, "", "Y to skip directory, N to proceed", /[YN]/i) =~ /Y/i
+            conflicts.any? && wait_key(pane, [ *conflicts, "", "Y to skip directory, N to proceed" ], /[YN]/i) =~ /Y/i
           end.progress(bar, "copying cover art").each do |folder, group|
             paths, new_paths, tags = group.transpose
             image_path = folder + "folder.jpg"
