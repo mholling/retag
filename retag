@@ -344,7 +344,7 @@ OptionParser.new("usage: retag [options] [file]") do |opts|
   opts.on "--apic", "store cover art in APIC tags" do |value|
     options[:apic] = true
   end
-  opts.on "--preserve", "preserve file attributes when copying" do |value|
+  opts.on "--preserve", "preserve original file timestamps when copying" do |value|
     options[:preserve] = true
   end
 end.parse!
@@ -743,7 +743,8 @@ begin
             end
             FileUtils.mkdir_p new_path.parent
             FileUtils.mv temp_path, new_path
-            system "cp", "--attributes-only", "--preserve", path.to_s, new_path.to_s if options[:preserve]
+            system "cp", "--attributes-only", "--preserve=timestamps", path.to_s, new_path.to_s if options[:preserve]
+            new_path.chmod 644
           end
         end
         raise StopIteration
