@@ -15,8 +15,9 @@ require 'base64'
 require 'erb'
 require 'net/http'
 require 'json'
+require 'etc'
 
-# gems required: curses, taglib, diff-lcs
+# gems required: curses, taglib-ruby, diff-lcs
 
 ACTIONS, FRAME_IDS, HEADINGS = [
   [ :read_tags   , nil   , "Read Tags"    ],
@@ -598,6 +599,9 @@ begin
         end
       end
     when :replay_gain
+      mp3gain = %w[mp3gain aacgain].find do |command|
+        system command, "-h", err: File::NULL, out: File::NULL
+      end
       loop do
         replay_gain_ids = %w[REPLAYGAIN_TRACK_GAIN REPLAYGAIN_TRACK_PEAK REPLAYGAIN_ALBUM_GAIN REPLAYGAIN_ALBUM_PEAK]
         all = tracks.group_by do |path, frames|
@@ -612,12 +616,16 @@ begin
           end
         end
         count = outstanding.count
+        unless mp3gain
+          wait_key(pane, "mp3gain or aacgain not installed", nil, *NEXT_PANE, *PREV_PANE, *QUIT)
+          break
+        end
         message = count > 0 ?
           "gain calculations outstanding for #{outstanding.count} album#{?s if outstanding.count > 1} - Y to calculate" :
           "all track and album gains are up to date - Y to recalculate"
         break unless wait_key(pane, message, /Y/i, *NEXT_PANE, *PREV_PANE, *QUIT)
         pane.clear
-        cpus = %x[nproc].to_i rescue 1
+        cpus = Etc.nprocessors rescue 1
         Dir.mktmpdir do |tmpdir|
           tmpdir = Pathname.new tmpdir
           (outstanding.any? ? outstanding : all).progress(bar, "calculating replay gains").with_index.inject([{}, []]) do |(jobs, results), ((is_album, group), album_index)|
@@ -633,8 +641,8 @@ begin
             paths.zip(temps).each do |path, temp|
               FileUtils.cp path, temp
             end
-            system "mp3gain", "-q", "-u", *temps.map(&:to_s)  # undo any applied gain
-            pid = Process.spawn "mp3gain", "-q", "-o", "-k", "-s", "s", *temps.map(&:to_s), :out => tsv_path.to_s
+            system mp3gain, "-q", "-u", *temps.map(&:to_s)  # undo any applied gain
+            pid = Process.spawn mp3gain, "-q", "-o", "-k", "-s", "s", *temps.map(&:to_s), :out => tsv_path.to_s
             jobs[pid] = [ tags, is_album, tsv_path, temps ]
             [ jobs, results ]
           end.tap do |jobs, results|
